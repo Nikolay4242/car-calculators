@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Калькулятор стоимости авто (mobile.de)</title>
+  <style>
+    body { font-family: sans-serif; background: #f7f7f7; }
+    .container {
+      max-width: 100%;
+      background: #fff;
+      padding: 1.5rem;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    input[type="text"] {
+      width: 100%; padding: 10px; font-size: 14px; margin-top: 5px; box-sizing: border-box;
+    }
+    button { padding: 10px 20px; margin-top: 10px; cursor: pointer; }
+    #carInfo { margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Калькулятор стоимости авто (mobile.de)</h2>
+    <label for="carUrl">Ссылка на автомобиль с 
+      <a href="https://www.mobile.de/ru" target="_blank" rel="noopener">mobile.de</a>:
+    </label>
+    <input type="text" id="carUrl" placeholder="https://www.mobile.de/..." />
+
+    <div style="display: flex; gap: 10px;">
+      <button onclick="fetchCarData()">Загрузить</button>
+      <button onclick="resetForm()">Сбросить</button>
+    </div>
+
+    <div id="carInfo"></div>
+  </div>
+
+  <script>
+function calculateDuty(brutto, engine) {
+  const tiers = [
+    { max: 8500, rate: 0.54, perCC: 2.5 },
+    { max: 16700, rate: 0.48, perCC: 3.5 },
+    { max: 42300, rate: 0.48, perCC: 5.5 },
+    { max: 84500, rate: 0.48, perCC: 7.5 },
+    { max: 169000, rate: 0.48, perCC: 15 },
+    { max: Infinity, rate: 0.48, perCC: 20 }
+  ];
+
+  for (const tier of tiers) {
+    if (brutto <= tier.max) {
+      const percent = brutto * tier.rate;
+      const cubic = engine * tier.perCC;
+      return Math.max(percent, cubic);
+    }
+  }
+  return 0;
+}
+
+function fetchCarData() {
+  const url = document.getElementById('carUrl').value.trim();
+  if (!url) {
+    alert('Введите ссылку на объявление');
+    return;
+  }
+
+  document.getElementById('carInfo').innerHTML = 'Загрузка...';
+
+  fetch('https://carspremium.ru/wp-content/themes/hello-elementor/parser.php', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ link: url })
+  })
+  .then(res => res.json())
+  .then(data => {
+    if (data.error) {
+      document.getElementById('carInfo').innerHTML = `<span style="color:red;">Ошибка: ${data.error}</span>`;
+      return;
+    }
+
+    const name = data.name || '';
+    const firstReg = data.firstRegistration || '';
+    let year = parseInt(data.year);
+    let month = parseInt(data.month || '1') - 1;
+
+    if (firstReg && /^\d{4}-\d{2}$/.test(firstReg)) {
+      const [y, m] = firstReg.split("-");
+      year = parseInt(y);
+      month = parseInt(m) - 1;
+    }
+
+    const engine = parseFloat(data.engine) || 0;
+    const bruttoPrice = parseFloat(data.price) || 0;
+    const mileage = data.mileage || '';
+    const fuel = (data.fuel || '').toLowerCase();
+    const isElectric = data.isElectric === true;
+    // гибриды теперь НЕ отдельная категория
+    // const isHybrid  = data.isHybrid  === true;
+
+    if (!year || isNaN(year)) {
+      document.getElementById('carInfo').innerHTML = `
+        <strong>${name}</strong><br>
+        <span style="color:red;">Год выпуска не определён — расчёт невозможен</span>
+      `;
+      return;
+    }
+
+    // ---- возраст ----
+    const now = new Date();
+    const ageMonths = (now.getFullYear() - year) * 12 + (now.getMonth() - month);
+    const ageYears = Math.floor(ageMonths / 12);
+    const ageRemMonths = ageMonths % 12;
+
+    if (ageMonths >= 60) {
+      document.getElementById('carInfo').innerHTML = `
+        <strong>${name}</strong><br>
+        Первая регистрация: ${firstReg || year}<br>
+        Объём двигателя: ${engine} см³<br>
+        Пробег: ${mileage}<br>
+        <span style="color:red;">Расчёт недоступен для авто старше 5 лет</span>
+      `;
+      return;
+    }
+
+    const shipping = 10000;
+    let customs = 0;
+    let final = 0;
+    let category = "";
+
+    if (isElectric) {
+      // только чистые электромобили
+      category = "Электро";
+      final = Math.round(bruttoPrice + bruttoPrice * 0.5 + bruttoPrice * 0.1 + shipping);
+    } else {
+      // ДВС + гибриды
+      if (ageMonths < 36) {
+        category = "Моложе 3 лет";
+        customs = calculateDuty(bruttoPrice, engine);
+      } else {
+        category = "От 3 до 5 лет";
+        if (engine <= 1000) customs = engine * 1.5;
+        else if (engine <= 1500) customs = engine * 1.7;
+        else if (engine <= 1800) customs = engine * 2.5;
+        else if (engine <= 2300) customs = engine * 2.7;
+        else if (engine <= 3000) customs = engine * 3.0;
+        else customs = engine * 3.6;
+      }
+      final = Math.round(bruttoPrice + customs + bruttoPrice * 0.1 + shipping);
+    }
+
+    document.getElementById('carInfo').innerHTML = `
+      <strong>${name}</strong><br>
+      Первая регистрация: ${firstReg} (${category}, возраст ${ageYears} г. ${ageRemMonths} мес.)<br>
+      Объём двигателя: ${engine} см³<br>
+      Пробег: ${mileage}<br>
+      Тип топлива: ${fuel}<br>
+      Цена автомобиля: ${bruttoPrice.toLocaleString()} €<br><br>
+      <strong>Итоговая цена: ${final.toLocaleString()} €</strong>
+    `;
+  })
+  .catch(err => {
+    console.error('Ошибка запроса:', err);
+    document.getElementById('carInfo').innerHTML = '<span style="color:red;">Ошибка при запросе</span>';
+  });
+}
+
+function resetForm() {
+  document.getElementById('carUrl').value = '';
+  document.getElementById('carInfo').innerHTML = '';
+}
+</script>
+
+</body>
+</html>

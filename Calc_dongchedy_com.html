@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Калькулятор стоимости авто (Китай)</title>
+  <style>
+    body { font-family: sans-serif; background: #f7f7f7; }
+    .container {
+      max-width: 100%;
+      background: #fff;
+      padding: 1.5rem;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    input[type="text"] {
+      width: 100%; padding: 10px; font-size: 14px; margin-top: 5px; box-sizing: border-box;
+    }
+    button { padding: 10px 20px; margin-top: 10px; cursor: pointer; }
+    #carInfo { margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Калькулятор стоимости авто (Китай)</h2>
+    <label for="carUrl">Ссылка на автомобиль с 
+      <a href="https://www.dongchedi.com/" target="_blank" rel="noopener">dongchedi.com</a>:
+    </label>
+    <input type="text" id="carUrl" placeholder="https://www.dongchedi.com/..." />
+
+    <div style="display: flex; gap: 10px;">
+      <button id="btnLoad">Загрузить</button>
+      <button id="btnReset">Сбросить</button>
+    </div>
+
+    <div id="carInfo"></div>
+  </div>
+
+<script>
+(function(){
+  const btnLoad = document.getElementById('btnLoad');
+  const btnReset = document.getElementById('btnReset');
+  const carUrlInput = document.getElementById('carUrl');
+  const carInfoDiv = document.getElementById('carInfo');
+
+  btnLoad.addEventListener("click", fetchCarData);
+  btnReset.addEventListener("click", resetForm);
+
+  async function getRates() {
+    const res = await fetch("https://www.cbr-xml-daily.ru/daily_json.js");
+    const data = await res.json();
+
+    const usdRub = data.Valute.USD.Value / data.Valute.USD.Nominal;
+    const cnyRub = data.Valute.CNY.Value / data.Valute.CNY.Nominal;
+
+    return {
+      usdRub,
+      cnyUsd: cnyRub / usdRub // курс CNY → USD
+    };
+  }
+
+  async function fetchCarData() {
+    const url = carUrlInput.value.trim();
+    if (!url) {
+      alert('Введите ссылку на объявление');
+      return;
+    }
+
+    carInfoDiv.innerHTML = 'Загрузка...';
+
+    try {
+      const rates = await getRates();
+
+      const res = await fetch('/wp-content/themes/hello-elementor/parser-proxy.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ link: url })
+      });
+      const data = await res.json();
+
+      if (data.error) {
+        carInfoDiv.innerHTML = '<span style="color:red;">Ошибка: ' + data.error + '</span>';
+        return;
+      }
+
+      // --- дата регистрации ---
+      const rawReg = data.firstRegistration || "";
+      let year = 0, month = 0, regDate = null;
+
+      if (rawReg && /^\d{4}-\d{2}$/.test(rawReg)) {
+        const [y, m] = rawReg.split("-");
+        year = parseInt(y);
+        month = parseInt(m);
+        regDate = new Date(year, month - 1, 1);
+      } else if (data.year) {
+        year = parseInt(data.year);
+        regDate = new Date(year, 0, 1);
+        rawReg = `${year}-01`;
+      }
+
+      if (!year) {
+        carInfoDiv.innerHTML = `
+          Первая регистрация: ${rawReg}<br>
+          <span style="color:red;">Год выпуска не определён — расчёт невозможен</span>
+        `;
+        return;
+      }
+
+      // --- возраст ---
+      const now = new Date();
+      const ageMonths = (now.getFullYear() - regDate.getFullYear()) * 12 +
+                        (now.getMonth() - regDate.getMonth());
+      const ageYears = Math.floor(ageMonths / 12);
+      const ageRemMonths = ageMonths % 12;
+
+      if (ageMonths >= 60) {
+        carInfoDiv.innerHTML = `
+          Первая регистрация: ${rawReg}<br>
+          Объём двигателя: ${data.engine || 0} см³<br>
+          Пробег: ${data.mileage || ""}<br>
+          <span style="color:red;">Расчёт недоступен для авто старше 5 лет</span>
+        `;
+        return;
+      }
+
+      // --- данные ---
+      const engine = Number(data.engine) || 0;
+      const bruttoPriceCNY = Number(data.price) || 0;
+      const bruttoPriceUSD = bruttoPriceCNY * rates.cnyUsd;
+      const mileage = (data.mileage !== undefined && data.mileage !== null) ? data.mileage : "";
+
+      let fuel = (data.fuel || '').toLowerCase();
+      switch(fuel) {
+        case "petrol": fuel = "Бензин"; break;
+        case "diesel": fuel = "Дизель"; break;
+        case "lpg": fuel = "Газ (LPG)"; break;
+        case "hybrid": fuel = "Гибрид"; break;
+        case "electric": fuel = "Электро"; break;
+      }
+
+      const isElectric = data.isElectric === true;
+      const isHybrid = data.isHybrid === true;
+
+      // --- расчёт ---
+      const shipping = 10000; // USD
+      let customs = 0, final = 0, category = "";
+
+      if (isElectric || isHybrid) {
+        category = "Электро/Гибрид";
+        final = Math.round(bruttoPriceUSD + bruttoPriceUSD * 0.5 + bruttoPriceUSD * 0.1 + shipping);
+      } else {
+        if (ageMonths < 36) {
+          category = "Моложе 3 лет";
+          customs = Math.max(bruttoPriceUSD * 0.48, engine * 2.5);
+        } else {
+          category = "От 3 до 5 лет";
+          if (engine <= 1000) customs = engine * 1.5;
+          else if (engine <= 1500) customs = engine * 1.7;
+          else if (engine <= 1800) customs = engine * 2.5;
+          else if (engine <= 2300) customs = engine * 2.7;
+          else if (engine <= 3000) customs = engine * 3.0;
+          else customs = engine * 3.6;
+        }
+        final = Math.round(bruttoPriceUSD + customs + bruttoPriceUSD * 0.1 + shipping);
+      }
+
+      // --- вывод ---
+      carInfoDiv.innerHTML = `
+        Первая регистрация: ${rawReg} (${category}, возраст ${ageYears} г. ${ageRemMonths} мес.)<br>
+        Объём двигателя: ${engine} см³<br>
+        Пробег: ${mileage}<br>
+        Тип топлива: ${fuel}<br>
+        Цена автомобиля: $${bruttoPriceUSD.toLocaleString(undefined,{maximumFractionDigits:0})}<br><br>
+        <strong>Итоговая цена: $${final.toLocaleString(undefined,{maximumFractionDigits:0})}</strong>
+      `;
+    } catch (err) {
+      console.error('Ошибка:', err);
+      carInfoDiv.innerHTML = '<span style="color:red;">Ошибка при запросе</span>';
+    }
+  }
+
+  function resetForm() {
+    carUrlInput.value = '';
+    carInfoDiv.innerHTML = '';
+  }
+})();
+</script>
+</body>
+</html>

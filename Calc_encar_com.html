@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Калькулятор стоимости авто (Корея)</title>
+  <style>
+    body { font-family: sans-serif; background: #f7f7f7; }
+    .container {
+      max-width: 100%;
+      background: #fff;
+      padding: 1.5rem;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    input[type="text"] {
+      width: 100%; padding: 10px; font-size: 14px; margin-top: 5px; box-sizing: border-box;
+    }
+    button { padding: 10px 20px; margin-top: 10px; cursor: pointer; }
+    #carInfo { margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Калькулятор стоимости авто (Корея)</h2>
+    <label for="carUrl">Ссылка на автомобиль с
+      <a href="https://www.encar.com/" target="_blank" rel="noopener">encar.com</a>:
+    </label>
+    <input type="text" id="carUrl" placeholder="https://www.encar.com/..." />
+
+    <div style="display: flex; gap: 10px;">
+      <button id="btnLoad">Загрузить</button>
+      <button id="btnReset">Сбросить</button>
+    </div>
+
+    <div id="carInfo"></div>
+  </div>
+
+  <script>
+  (function () {
+    const btnLoad = document.getElementById('btnLoad');
+    const btnReset = document.getElementById('btnReset');
+    const carUrlInput = document.getElementById('carUrl');
+    const carInfoDiv = document.getElementById('carInfo');
+
+    btnLoad.addEventListener('click', fetchCarData);
+    btnReset.addEventListener('click', resetForm);
+
+    async function getRates() {
+      const res = await fetch('https://www.cbr-xml-daily.ru/daily_json.js');
+      const data = await res.json();
+      const usdRub = data.Valute.USD.Value / data.Valute.USD.Nominal;
+      const krwRub = data.Valute.KRW.Value / data.Valute.KRW.Nominal;
+      return { usdRub, krwUsd: krwRub / usdRub }; // сколько USD в 1 KRW
+    }
+
+    // ---- нормализация корейской даты → YYYY-MM ----
+    function normalizeDate(raw) {
+      if (!raw) return null;
+      raw = String(raw).trim();
+
+      // "22년 10월" / "2022년 10월" → 2022-10
+      let m = raw.match(/((?:19|20)\d{2})\s*년\s*(\d{1,2})\s*월/);
+      if (m) return `${m[1]}-${String(m[2]).padStart(2, '0')}`;
+
+      // "22년 10월" (2-значный год) → 2022-10
+      m = raw.match(/(\d{2})\s*년\s*(\d{1,2})\s*월/);
+      if (m) {
+        let yy = parseInt(m[1], 10);
+        const mm = String(m[2]).padStart(2, '0');
+        const cur2 = new Date().getFullYear() % 100;
+        yy = yy <= cur2 ? 2000 + yy : 1900 + yy;
+        return `${yy}-${mm}`;
+      }
+
+      // "22/10식" или "22/10" → 2022-10
+      m = raw.match(/(\d{2})\s*\/\s*(\d{1,2})/);
+      if (m) {
+        const yy = parseInt(m[1], 10);
+        const mm = String(m[2]).padStart(2, '0');
+        const century = yy <= new Date().getFullYear() % 100 ? 2000 : 1900;
+        return `${century + yy}-${mm}`;
+      }
+
+      // "YYYY.MM" / "YYYY/MM" / "YYYY-MM"
+      m = raw.match(/((?:19|20)\d{2})[.\-\/](\d{1,2})/);
+      if (m) return `${m[1]}-${String(m[2]).padStart(2, '0')}`;
+
+      // Только год → YYYY-01
+      m = raw.match(/((?:19|20)\d{2})/);
+      if (m) return `${m[1]}-01`;
+
+      // Общий кейс: "22 10", "2022 10" и т.п.
+      m = raw.match(/(\d{2,4})\D+(\d{1,2})/);
+      if (m) {
+        let yy = parseInt(m[1], 10);
+        const mm = String(m[2]).padStart(2, '0');
+        if (yy < 100) {
+          const cur2 = new Date().getFullYear() % 100;
+          yy = yy <= cur2 ? 2000 + yy : 1900 + yy;
+        }
+        return `${yy}-${mm}`;
+      }
+
+      return null;
+    }
+
+    async function fetchCarData() {
+      const url = carUrlInput.value.trim();
+      if (!url) {
+        alert('Введите ссылку на объявление');
+        return;
+      }
+
+      carInfoDiv.innerHTML = 'Загрузка...';
+
+      try {
+        const rates = await getRates();
+
+        const res = await fetch('https://carspremium.ru/wp-content/themes/hello-elementor/parser-proxy.php', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ link: url })
+        });
+        const data = await res.json();
+
+        if (data.error) {
+          carInfoDiv.innerHTML = `<span style="color:red;">Ошибка: ${data.error}</span>`;
+          return;
+        }
+
+        // ---- дата регистрации ----
+        const rawReg = data.firstRegistration || data.year || '';
+        const normalized = normalizeDate(rawReg);
+        if (!normalized) {
+          carInfoDiv.innerHTML = `
+            Первая регистрация: ${rawReg}<br>
+            <span style="color:red;">Год выпуска не определён — расчёт невозможен</span>
+          `;
+          return;
+        }
+        const [y, m] = normalized.split('-');
+        const regDate = new Date(parseInt(y, 10), parseInt(m, 10) - 1, 1);
+
+        // ---- данные ----
+        const engine = Number(data.engine) || 0;
+        const bruttoPriceKRW = Number(data.price) || 0;
+        const bruttoPriceUSD = bruttoPriceKRW * rates.krwUsd;
+        const mileage = (data.mileage !== undefined && data.mileage !== null) ? data.mileage : '';
+
+        let fuel = String(data.fuel || '').toLowerCase();
+        switch (fuel) {
+          case 'petrol': fuel = 'Бензин'; break;
+          case 'diesel': fuel = 'Дизель'; break;
+          case 'lpg': fuel = 'Газ (LPG)'; break;
+          case 'hybrid': fuel = 'Гибрид'; break;
+          case 'electric': fuel = 'Электро'; break;
+          default: fuel = fuel || ''; break;
+        }
+
+        const isElectric = data.isElectric === true;
+        const isHybrid  = data.isHybrid  === true;
+
+        // ---- возраст ----
+        const now = new Date();
+        const ageMonths = (now.getFullYear() - regDate.getFullYear()) * 12 +
+                          (now.getMonth() - regDate.getMonth());
+        const ageYears = Math.floor(ageMonths / 12);
+        const ageRemMonths = ageMonths % 12;
+
+        if (ageMonths >= 60) {
+          carInfoDiv.innerHTML = `
+            Первая регистрация: ${normalized}<br>
+            Объём двигателя: ${engine} см³<br>
+            Пробег: ${mileage}<br>
+            <span style="color:red;">Расчёт недоступен для авто старше 5 лет</span>
+          `;
+          return;
+        }
+
+        // ---- расчёт ----
+        const shipping = 10000; // USD
+        let customs = 0;
+        let final = 0;
+        let ageNote = '';
+
+        if (isElectric || isHybrid) {
+          // Электро/гибрид — особая формула
+          final = Math.round(bruttoPriceUSD + bruttoPriceUSD * 0.5 + bruttoPriceUSD * 0.1 + shipping);
+          ageNote = 'Электро/Гибрид';
+        } else {
+          if (ageMonths < 36) {
+            // Младше 3 лет — максимум из процента и кубиков
+            customs = Math.max(bruttoPriceUSD * 0.48, engine * 2.5);
+            ageNote = 'Младше 3 лет';
+          } else {
+            // 3–5 лет — по кубатуре
+            if (engine <= 1000) customs = engine * 1.5;
+            else if (engine <= 1500) customs = engine * 1.7;
+            else if (engine <= 1800) customs = engine * 2.5;
+            else if (engine <= 2300) customs = engine * 2.7;
+            else if (engine <= 3000) customs = engine * 3.0;
+            else customs = engine * 3.6;
+            ageNote = 'От 3 до 5 лет';
+          }
+          final = Math.round(bruttoPriceUSD + customs + bruttoPriceUSD * 0.1 + shipping);
+        }
+
+        carInfoDiv.innerHTML = `
+          Первая регистрация: ${normalized} (${ageNote}, возраст ${ageYears} г. ${ageRemMonths} мес.)<br>
+          Объём двигателя: ${engine} см³<br>
+          Пробег: ${mileage}<br>
+          Тип топлива: ${fuel}<br>
+          Цена автомобиля: $${bruttoPriceUSD.toLocaleString(undefined, { maximumFractionDigits: 0 })}<br><br>
+          <strong>Итоговая цена: $${final.toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong>
+        `;
+      } catch (err) {
+        console.error('Ошибка:', err);
+        carInfoDiv.innerHTML = '<span style="color:red;">Ошибка при запросе</span>';
+      }
+    }
+
+    function resetForm() {
+      carUrlInput.value = '';
+      carInfoDiv.innerHTML = '';
+    }
+  })();
+  </script>
+</body>
+</html>
